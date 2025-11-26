@@ -4,8 +4,9 @@ package dnsserver
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net"
-	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -31,44 +32,69 @@ import (
 // the same address and the listener may be stopped for
 // graceful termination (POSIX only).
 type Server struct {
-	Addr string // Address we listen on
+	Addr         string        // Address we listen on
+	IdleTimeout  time.Duration // Idle timeout for TCP
+	ReadTimeout  time.Duration // Read timeout for TCP
+	WriteTimeout time.Duration // Write timeout for TCP
 
 	server [2]*dns.Server // 0 is a net.Listener, 1 is a net.PacketConn (a *UDPConn) in our case.
 	m      sync.Mutex     // protects the servers
 
-	zones        map[string]*Config // zones keyed by their address
-	dnsWg        sync.WaitGroup     // used to wait on outstanding connections
-	graceTimeout time.Duration      // the maximum duration of a graceful shutdown
-	trace        trace.Trace        // the trace plugin for the server
-	debug        bool               // disable recover()
-	classChaos   bool               // allow non-INET class queries
+	zones        map[string][]*Config // zones keyed by their address
+	graceTimeout time.Duration        // the maximum duration of a graceful shutdown
+	trace        trace.Trace          // the trace plugin for the server
+	debug        bool                 // disable recover()
+	stacktrace   bool                 // enable stacktrace in recover error log
+	classChaos   bool                 // allow non-INET class queries
+
+	tsigSecret map[string]string
+
+	// Ensure Stop is idempotent when invoked concurrently (e.g., during reload and SIGTERM).
+	stopOnce sync.Once
+	stopErr  error
+}
+
+// MetadataCollector is a plugin that can retrieve metadata functions from all metadata providing plugins
+type MetadataCollector interface {
+	Collect(context.Context, request.Request) context.Context
 }
 
 // NewServer returns a new CoreDNS server and compiles all plugins in to it. By default CH class
 // queries are blocked unless queries from enableChaos are loaded.
 func NewServer(addr string, group []*Config) (*Server, error) {
-
 	s := &Server{
 		Addr:         addr,
-		zones:        make(map[string]*Config),
+		zones:        make(map[string][]*Config),
 		graceTimeout: 5 * time.Second,
+		IdleTimeout:  10 * time.Second,
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 5 * time.Second,
+		tsigSecret:   make(map[string]string),
 	}
-
-	// We have to bound our wg with one increment
-	// to prevent a "race condition" that is hard-coded
-	// into sync.WaitGroup.Wait() - basically, an add
-	// with a positive delta must be guaranteed to
-	// occur before Wait() is called on the wg.
-	// In a way, this kind of acts as a safety barrier.
-	s.dnsWg.Add(1)
 
 	for _, site := range group {
 		if site.Debug {
 			s.debug = true
 			log.D.Set()
 		}
-		// set the config per zone
-		s.zones[site.Zone] = site
+		s.stacktrace = site.Stacktrace
+
+		// append the config to the zone's configs
+		s.zones[site.Zone] = append(s.zones[site.Zone], site)
+
+		// set timeouts
+		if site.ReadTimeout != 0 {
+			s.ReadTimeout = site.ReadTimeout
+		}
+		if site.WriteTimeout != 0 {
+			s.WriteTimeout = site.WriteTimeout
+		}
+		if site.IdleTimeout != 0 {
+			s.IdleTimeout = site.IdleTimeout
+		}
+
+		// copy tsig secrets
+		maps.Copy(s.tsigSecret, site.TsigSecret)
 
 		// compile custom plugin for everything
 		var stack plugin.Handler
@@ -77,6 +103,12 @@ func NewServer(addr string, group []*Config) (*Server, error) {
 
 			// register the *handler* also
 			site.registerHandler(stack)
+
+			// If the current plugin is a MetadataCollector, bookmark it for later use. This loop traverses the plugin
+			// list backwards, so the first MetadataCollector plugin wins.
+			if mdc, ok := stack.(MetadataCollector); ok {
+				site.metaCollector = mdc
+			}
 
 			if s.trace == nil && stack.Name() == "trace" {
 				// we have to stash away the plugin, not the
@@ -108,11 +140,22 @@ var _ caddy.GracefulServer = &Server{}
 // This implements caddy.TCPServer interface.
 func (s *Server) Serve(l net.Listener) error {
 	s.m.Lock()
-	s.server[tcp] = &dns.Server{Listener: l, Net: "tcp", Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
-		ctx := context.WithValue(context.Background(), Key{}, s)
-		ctx = context.WithValue(ctx, LoopKey{}, 0)
-		s.ServeDNS(ctx, w, r)
-	})}
+
+	s.server[tcp] = &dns.Server{Listener: l,
+		Net:           "tcp",
+		TsigSecret:    s.tsigSecret,
+		MaxTCPQueries: tcpMaxQueries,
+		ReadTimeout:   s.ReadTimeout,
+		WriteTimeout:  s.WriteTimeout,
+		IdleTimeout: func() time.Duration {
+			return s.IdleTimeout
+		},
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+			ctx := context.WithValue(context.Background(), Key{}, s)
+			ctx = context.WithValue(ctx, LoopKey{}, 0)
+			s.ServeDNS(ctx, w, r)
+		})}
+
 	s.m.Unlock()
 
 	return s.server[tcp].ActivateAndServe()
@@ -126,7 +169,7 @@ func (s *Server) ServePacket(p net.PacketConn) error {
 		ctx := context.WithValue(context.Background(), Key{}, s)
 		ctx = context.WithValue(ctx, LoopKey{}, 0)
 		s.ServeDNS(ctx, w, r)
-	})}
+	}), TsigSecret: s.tsigSecret}
 	s.m.Unlock()
 
 	return s.server[udp].ActivateAndServe()
@@ -156,41 +199,36 @@ func (s *Server) ListenPacket() (net.PacketConn, error) {
 	return p, nil
 }
 
-// Stop stops the server. It blocks until the server is
-// totally stopped. On POSIX systems, it will wait for
-// connections to close (up to a max timeout of a few
-// seconds); on Windows it will close the listener
-// immediately.
+// Stop attempts to gracefully stop the server.
+// It waits until the server is stopped and its connections are closed,
+// up to a max timeout of a few seconds. If unsuccessful, an error is returned.
+//
 // This implements Caddy.Stopper interface.
-func (s *Server) Stop() (err error) {
+func (s *Server) Stop() error {
+	s.stopOnce.Do(func() {
+		ctx, cancelCtx := context.WithTimeout(context.Background(), s.graceTimeout)
+		defer cancelCtx()
 
-	if runtime.GOOS != "windows" {
-		// force connections to close after timeout
-		done := make(chan struct{})
-		go func() {
-			s.dnsWg.Done() // decrement our initial increment used as a barrier
-			s.dnsWg.Wait()
-			close(done)
-		}()
+		var wg sync.WaitGroup
+		s.m.Lock()
+		for _, s1 := range s.server {
+			// We might not have started and initialized the full set of servers
+			if s1 == nil {
+				continue
+			}
 
-		// Wait for remaining connections to finish or
-		// force them all to close after timeout
-		select {
-		case <-time.After(s.graceTimeout):
-		case <-done:
+			wg.Add(1)
+			go func() {
+				s1.ShutdownContext(ctx)
+				wg.Done()
+			}()
 		}
-	}
+		s.m.Unlock()
+		wg.Wait()
 
-	// Close the listener now; this stops the server without delay
-	s.m.Lock()
-	for _, s1 := range s.server {
-		// We might not have started and initialized the full set of servers
-		if s1 != nil {
-			err = s1.Shutdown()
-		}
-	}
-	s.m.Unlock()
-	return
+		s.stopErr = ctx.Err()
+	})
+	return s.stopErr
 }
 
 // Address together with Stop() implement caddy.GracefulServer.
@@ -213,7 +251,11 @@ func (s *Server) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 			// In case the user doesn't enable error plugin, we still
 			// need to make sure that we stay alive up here
 			if rec := recover(); rec != nil {
-				log.Errorf("Recovered from panic in server: %q", s.Addr)
+				if s.stacktrace {
+					log.Errorf("Recovered from panic in server: %q %v\n%s", s.Addr, rec, string(debug.Stack()))
+				} else {
+					log.Errorf("Recovered from panic in server: %q %v", s.Addr, rec)
+				}
 				vars.Panic.Inc()
 				errorAndMetricsFunc(s.Addr, w, r, dns.RcodeServerFailure)
 			}
@@ -241,35 +283,39 @@ func (s *Server) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 	)
 
 	for {
-		if h, ok := s.zones[q[off:]]; ok {
-			if h.pluginChain == nil { // zone defined, but has not got any plugins
-				errorAndMetricsFunc(s.Addr, w, r, dns.RcodeRefused)
-				return
-			}
-			if r.Question[0].Qtype != dns.TypeDS {
-				if h.FilterFunc == nil {
-					rcode, _ := h.pluginChain.ServeDNS(ctx, w, r)
-					if !plugin.ClientWrite(rcode) {
-						errorFunc(s.Addr, w, r, rcode)
-					}
+		if z, ok := s.zones[q[off:]]; ok {
+			for _, h := range z {
+				if h.pluginChain == nil { // zone defined, but has not got any plugins
+					errorAndMetricsFunc(s.Addr, w, r, dns.RcodeRefused)
 					return
 				}
-				// FilterFunc is set, call it to see if we should use this handler.
-				// This is given to full query name.
-				if h.FilterFunc(q) {
-					rcode, _ := h.pluginChain.ServeDNS(ctx, w, r)
-					if !plugin.ClientWrite(rcode) {
-						errorFunc(s.Addr, w, r, rcode)
+
+				if h.metaCollector != nil {
+					// Collect metadata now, so it can be used before we send a request down the plugin chain.
+					ctx = h.metaCollector.Collect(ctx, request.Request{Req: r, W: w})
+				}
+
+				// If all filter funcs pass, use this config.
+				if passAllFilterFuncs(ctx, h.FilterFuncs, &request.Request{Req: r, W: w}) {
+					if h.ViewName != "" {
+						// if there was a view defined for this Config, set the view name in the context
+						ctx = context.WithValue(ctx, ViewKey{}, h.ViewName)
 					}
-					return
+					if r.Question[0].Qtype != dns.TypeDS {
+						rcode, _ := h.pluginChain.ServeDNS(ctx, w, r)
+						if !plugin.ClientWrite(rcode) {
+							errorFunc(s.Addr, w, r, rcode)
+						}
+						return
+					}
+					// The type is DS, keep the handler, but keep on searching as maybe we are serving
+					// the parent as well and the DS should be routed to it - this will probably *misroute* DS
+					// queries to a possibly grand parent, but there is no way for us to know at this point
+					// if there is an actual delegation from grandparent -> parent -> zone.
+					// In all fairness: direct DS queries should not be needed.
+					dshandler = h
 				}
 			}
-			// The type is DS, keep the handler, but keep on searching as maybe we are serving
-			// the parent as well and the DS should be routed to it - this will probably *misroute* DS
-			// queries to a possibly grand parent, but there is no way for us to know at this point
-			// if there is an actual delegation from grandparent -> parent -> zone.
-			// In all fairness: direct DS queries should not be needed.
-			dshandler = h
 		}
 		off, end = dns.NextLabel(q, off)
 		if end {
@@ -287,16 +333,44 @@ func (s *Server) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg)
 	}
 
 	// Wildcard match, if we have found nothing try the root zone as a last resort.
-	if h, ok := s.zones["."]; ok && h.pluginChain != nil {
-		rcode, _ := h.pluginChain.ServeDNS(ctx, w, r)
-		if !plugin.ClientWrite(rcode) {
-			errorFunc(s.Addr, w, r, rcode)
+	if z, ok := s.zones["."]; ok {
+		for _, h := range z {
+			if h.pluginChain == nil {
+				continue
+			}
+
+			if h.metaCollector != nil {
+				// Collect metadata now, so it can be used before we send a request down the plugin chain.
+				ctx = h.metaCollector.Collect(ctx, request.Request{Req: r, W: w})
+			}
+
+			// If all filter funcs pass, use this config.
+			if passAllFilterFuncs(ctx, h.FilterFuncs, &request.Request{Req: r, W: w}) {
+				if h.ViewName != "" {
+					// if there was a view defined for this Config, set the view name in the context
+					ctx = context.WithValue(ctx, ViewKey{}, h.ViewName)
+				}
+				rcode, _ := h.pluginChain.ServeDNS(ctx, w, r)
+				if !plugin.ClientWrite(rcode) {
+					errorFunc(s.Addr, w, r, rcode)
+				}
+				return
+			}
 		}
-		return
 	}
 
 	// Still here? Error out with REFUSED.
 	errorAndMetricsFunc(s.Addr, w, r, dns.RcodeRefused)
+}
+
+// passAllFilterFuncs returns true if all filter funcs evaluate to true for the given request
+func passAllFilterFuncs(ctx context.Context, filterFuncs []FilterFunc, req *request.Request) bool {
+	for _, ff := range filterFuncs {
+		if !ff(ctx, req) {
+			return false
+		}
+	}
+	return true
 }
 
 // OnStartupComplete lists the sites served by this server
@@ -339,7 +413,7 @@ func errorAndMetricsFunc(server string, w dns.ResponseWriter, r *dns.Msg, rc int
 	answer.SetRcode(r, rc)
 	state.SizeAndDo(answer)
 
-	vars.Report(server, state, vars.Dropped, rcode.ToString(rc), answer.Len(), time.Now())
+	vars.Report(server, state, vars.Dropped, "", rcode.ToString(rc), "" /* plugin */, answer.Len(), time.Now())
 
 	w.WriteMsg(answer)
 }
@@ -347,6 +421,8 @@ func errorAndMetricsFunc(server string, w dns.ResponseWriter, r *dns.Msg, rc int
 const (
 	tcp = 0
 	udp = 1
+
+	tcpMaxQueries = -1
 )
 
 type (
@@ -355,6 +431,9 @@ type (
 
 	// LoopKey is the context key to detect server wide loops.
 	LoopKey struct{}
+
+	// ViewKey is the context key for the current view, if defined
+	ViewKey struct{}
 )
 
 // EnableChaos is a map with plugin names for which we should open CH class queries as we block these by default.

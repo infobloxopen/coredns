@@ -42,6 +42,8 @@ kubernetes [ZONES...] {
     noendpoints
     fallthrough [ZONES...]
     ignore empty_service
+    multicluster [ZONES...]
+    startup_timeout DURATION
 }
 ```
 
@@ -87,7 +89,7 @@ kubernetes [ZONES...] {
    If this directive is included, then name selection for endpoints changes as
    follows: Use the hostname of the endpoint, or if hostname is not set, use the
    pod name of the pod targeted by the endpoint. If there is no pod targeted by
-   the endpoint, use the dashed IP address form.
+   the endpoint or pod name is longer than 63, use the dashed IP address form.
 * `ttl` allows you to set a custom TTL for responses. The default is 5 seconds.  The minimum TTL allowed is
   0 seconds, and the maximum is capped at 3600 seconds. Setting TTL to 0 will prevent records from being cached.
 * `noendpoints` will turn off the serving of endpoint records by disabling the watch on endpoints.
@@ -101,13 +103,36 @@ kubernetes [ZONES...] {
 * `ignore empty_service` returns NXDOMAIN for services without any ready endpoint addresses (e.g., ready pods).
   This allows the querying pod to continue searching for the service in the search path.
   The search path could, for example, include another Kubernetes cluster.
+* `multicluster` defines the multicluster zones as defined by Multi-Cluster
+  Services API (MCS-API). Specifying this option is generally paired with the
+  installation of an MCS-API implementation and the ServiceImport and ServiceExport
+  CRDs. The plugin MUST be authoritative for the zones listed here.
+* `startup_timeout` specifies the **DURATION** value that limits the time to wait for informer cache synced
+  when the kubernetes plugin starts. If not specified, the default timeout will be 5s.
 
 Enabling zone transfer is done by using the *transfer* plugin.
+
+## Startup
+
+When CoreDNS starts with the *kubernetes* plugin enabled, it will delay serving DNS for up to 5 seconds
+until it can connect to the Kubernetes API and synchronize all object watches.  If this cannot happen within
+5 seconds, then CoreDNS will start serving DNS while the *kubernetes* plugin continues to try to connect
+and synchronize all object watches.  CoreDNS will answer SERVFAIL to any request made for a Kubernetes record
+that has not yet been synchronized. You can also determine how long to wait by specifying `startup_timeout`.
+
+## Monitoring Kubernetes Endpoints
+
+The *kubernetes* plugin watches Endpoints via the `discovery.EndpointSlices` API.
 
 ## Ready
 
 This plugin reports readiness to the ready plugin. This will happen after it has synced to the
 Kubernetes API.
+
+## PTR Records
+
+This plugin creates PTR records for every Pod selected by a Service. If a given Pod is selected by more than
+one Service a separate PTR record will exist for each Service selecting it.
 
 ## Examples
 
@@ -137,6 +162,14 @@ Connect to Kubernetes with CoreDNS running outside the cluster:
 kubernetes cluster.local {
     endpoint https://k8s-endpoint:8443
     tls cert key cacert
+}
+~~~
+
+Configure multicluster
+
+~~~ txt
+kubernetes cluster.local clusterset.local {
+    multicluster clusterset.local
 }
 ~~~
 
@@ -182,25 +215,6 @@ packet received by CoreDNS must be the IP address of the Pod that sent the reque
         }
     }
 
-## Wildcards
-
-Some query labels accept a wildcard value to match any value.  If a label is a valid wildcard (\*,
-or the word "any"), then that label will match all values.  The labels that accept wildcards are:
-
- * _endpoint_ in an `A` record request: _endpoint_.service.namespace.svc.zone, e.g., `*.nginx.ns.svc.cluster.local`
- * _service_ in an `A` record request: _service_.namespace.svc.zone, e.g., `*.ns.svc.cluster.local`
- * _namespace_ in an `A` record request: service._namespace_.svc.zone, e.g., `nginx.*.svc.cluster.local`
- * _port and/or protocol_ in an `SRV` request: __port_.__protocol_.service.namespace.svc.zone.,
-   e.g., `_http.*.service.ns.svc.cluster.local`
- * multiple wildcards are allowed in a single query, e.g., `A` Request `*.*.svc.zone.` or `SRV` request `*.*.*.*.svc.zone.`
-
- For example, wildcards can be used to resolve all Endpoints for a Service as `A` records. e.g.: `*.service.ns.svc.myzone.local` will return the Endpoint IPs in the Service `service` in namespace `default`:
-
-```
-*.service.default.svc.cluster.local. 5	IN A	192.168.10.10
-*.service.default.svc.cluster.local. 5	IN A	192.168.25.15
-```
-
 ## Metadata
 
 The kubernetes plugin will publish the following metadata, if the *metadata*
@@ -214,9 +228,11 @@ plugin is also enabled:
  * `kubernetes/service`: the service name in the query
  * `kubernetes/client-namespace`: the client pod's namespace (see requirements below)
  * `kubernetes/client-pod-name`: the client pod's name (see requirements below)
+ * `kubernetes/client-label/<label key>`: a label on the client pod (see requirements below)
 
-The `kubernetes/client-namespace` and `kubernetes/client-pod-name` metadata work by reconciling the
-client IP address in the DNS request packet to a known pod IP address. Therefore the following is required:
+The `kubernetes/client-namespace`, `kubernetes/client-pod-name`, and `kubernetes/client-label/<label key>`
+metadata work by reconciling the client IP address in the DNS request packet to a known pod IP address.
+Therefore the following is required:
  * `pods verified` mode must be enabled
  * the remote IP address in the DNS packet received by CoreDNS must be the IP address
    of the Pod that sent the request.
@@ -233,6 +249,11 @@ If monitoring is enabled (via the *prometheus* plugin) then the following metric
     * `cluster_ip`
     * `headless_with_selector`
     * `headless_without_selector`
+
+The following are client level metrics to monitor apiserver request latency & status codes. `verb` identifies the apiserver [request type](https://kubernetes.io/docs/reference/using-api/api-concepts/#single-resource-api) and `host` denotes the apiserver endpoint.
+* `coredns_kubernetes_rest_client_request_duration_seconds{verb, host}` - captures apiserver request latency perceived by client grouped by `verb` and `host`.
+* `coredns_kubernetes_rest_client_rate_limiter_duration_seconds{verb, host}` - captures apiserver request latency contributed by client side rate limiter grouped by `verb` & `host`.
+* `coredns_kubernetes_rest_client_requests_total{method, code, host}` - captures total apiserver requests grouped by `method`, `status_code` & `host`.
 
 ## Bugs
 

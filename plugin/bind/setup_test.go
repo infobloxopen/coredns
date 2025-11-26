@@ -1,6 +1,7 @@
 package bind
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/coredns/caddy"
@@ -8,6 +9,12 @@ import (
 )
 
 func TestSetup(t *testing.T) {
+	// Skip on non-Linux systems as some tests refer to for e.g. loopback interfaces which
+	// are not present on all systems.
+	if runtime.GOOS != "linux" {
+		t.Skipf("Skipping bind test on %s", runtime.GOOS)
+	}
+
 	for i, test := range []struct {
 		config   string
 		expected []string
@@ -19,6 +26,8 @@ func TestSetup(t *testing.T) {
 		{`bind 1.2.3.4 ::5`, []string{"1.2.3.4", "::5"}, false},
 		{`bind ::1 1.2.3.4 ::5 127.9.9.0`, []string{"::1", "1.2.3.4", "::5", "127.9.9.0"}, false},
 		{`bind ::1 1.2.3.4 ::5 127.9.9.0 noone`, nil, true},
+		{`bind 1.2.3.4 lo`, []string{"1.2.3.4", "127.0.0.1", "::1"}, false},
+		{"bind lo {\nexcept 127.0.0.1\n}\n", []string{"::1"}, false},
 	} {
 		c := caddy.NewTestController("dns", test.config)
 		err := setup(c)

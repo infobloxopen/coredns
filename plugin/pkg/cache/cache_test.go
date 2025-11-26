@@ -1,6 +1,8 @@
 package cache
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestCacheAddAndGet(t *testing.T) {
 	const N = shardSize * 4
@@ -11,10 +13,10 @@ func TestCacheAddAndGet(t *testing.T) {
 		t.Fatal("Failed to find inserted record")
 	}
 
-	for i := 0; i < N; i++ {
+	for i := range N {
 		c.Add(uint64(i), 1)
 	}
-	for i := 0; i < N; i++ {
+	for i := range N {
 		c.Add(uint64(i), 1)
 		if c.Len() != N {
 			t.Fatal("A item was unnecessarily evicted from the cache")
@@ -43,7 +45,7 @@ func TestCacheLen(t *testing.T) {
 
 func TestCacheSharding(t *testing.T) {
 	c := New(shardSize)
-	for i := 0; i < shardSize*2; i++ {
+	for i := range shardSize * 2 {
 		c.Add(uint64(i), 1)
 	}
 	for i, s := range c.shards {
@@ -53,11 +55,30 @@ func TestCacheSharding(t *testing.T) {
 	}
 }
 
+func TestCacheWalk(t *testing.T) {
+	c := New(10)
+	exp := make([]int, 10*2)
+	for i := range 10 * 2 {
+		c.Add(uint64(i), 1)
+		exp[i] = 1
+	}
+	got := make([]int, 10*2)
+	c.Walk(func(items map[uint64]any, key uint64) bool {
+		got[key] = items[key].(int)
+		return true
+	})
+	for i := range exp {
+		if exp[i] != got[i] {
+			t.Errorf("Expected %d, got %d", exp[i], got[i])
+		}
+	}
+}
+
 func BenchmarkCache(b *testing.B) {
 	b.ReportAllocs()
 
 	c := New(4)
-	for n := 0; n < b.N; n++ {
+	for b.Loop() {
 		c.Add(1, 1)
 		c.Get(1)
 	}

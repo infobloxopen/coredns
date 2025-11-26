@@ -6,6 +6,7 @@ import (
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin/file/rrutil"
 	"github.com/coredns/coredns/plugin/file/tree"
+	"github.com/coredns/coredns/plugin/metadata"
 	"github.com/coredns/coredns/request"
 
 	"github.com/miekg/dns"
@@ -115,8 +116,21 @@ func (z *Zone) Lookup(ctx context.Context, state request.Request, qname string) 
 			// Only one DNAME is allowed per name. We just pick the first one to synthesize from.
 			dname := dnamerrs[0]
 			if cname := synthesizeCNAME(state.Name(), dname.(*dns.DNAME)); cname != nil {
-				ctx = context.WithValue(ctx, dnsserver.LoopKey{}, loop+1)
-				answer, ns, extra, rcode := z.externalLookup(ctx, state, elem, []dns.RR{cname})
+				var (
+					answer, ns, extra []dns.RR
+					rcode             Result
+				)
+
+				// We don't need to chase CNAME chain for synthesized CNAME
+				if qtype == dns.TypeCNAME {
+					answer = []dns.RR{cname}
+					ns = ap.ns(do)
+					extra = nil
+					rcode = Success
+				} else {
+					ctx = context.WithValue(ctx, dnsserver.LoopKey{}, loop+1)
+					answer, ns, extra, rcode = z.externalLookup(ctx, state, elem, []dns.RR{cname})
+				}
 
 				if do {
 					sigs := elem.Type(dns.TypeRRSIG)
@@ -137,7 +151,6 @@ func (z *Zone) Lookup(ctx context.Context, state request.Request, qname string) 
 
 		// If we see NS records, it means the name as been delegated, and we should return the delegation.
 		if nsrrs := elem.Type(dns.TypeNS); nsrrs != nil {
-
 			// If the query is specifically for DS and the qname matches the delegated name, we should
 			// return the DS in the answer section and leave the rest empty, i.e. just continue the loop
 			// and continue searching.
@@ -165,7 +178,6 @@ func (z *Zone) Lookup(ctx context.Context, state request.Request, qname string) 
 
 	// Found entire name.
 	if found && shot {
-
 		if rrs := elem.Type(dns.TypeCNAME); len(rrs) > 0 && qtype != dns.TypeCNAME {
 			ctx = context.WithValue(ctx, dnsserver.LoopKey{}, loop+1)
 			return z.externalLookup(ctx, state, elem, rrs)
@@ -194,16 +206,18 @@ func (z *Zone) Lookup(ctx context.Context, state request.Request, qname string) 
 		}
 
 		return rrs, ap.ns(do), additional, Success
-
 	}
 
 	// Haven't found the original name.
 
 	// Found wildcard.
 	if wildElem != nil {
-		auth := ap.ns(do)
+		// set metadata value for the wildcard record that synthesized the result
+		metadata.SetValueFunc(ctx, "zone/wildcard", func() string {
+			return wildElem.Name()
+		})
 
-		if rrs := wildElem.TypeForWildcard(dns.TypeCNAME, qname); len(rrs) > 0 {
+		if rrs := wildElem.TypeForWildcard(dns.TypeCNAME, qname); len(rrs) > 0 && qtype != dns.TypeCNAME {
 			ctx = context.WithValue(ctx, dnsserver.LoopKey{}, loop+1)
 			return z.externalLookup(ctx, state, wildElem, rrs)
 		}
@@ -217,9 +231,10 @@ func (z *Zone) Lookup(ctx context.Context, state request.Request, qname string) 
 				nsec := typeFromElem(wildElem, dns.TypeNSEC, do)
 				ret = append(ret, nsec...)
 			}
-			return nil, ret, nil, Success
+			return nil, ret, nil, NoData
 		}
 
+		auth := ap.ns(do)
 		if do {
 			// An NSEC is needed to say no longer name exists under this wildcard.
 			if deny, found := tr.Prev(qname); found {
@@ -230,7 +245,6 @@ func (z *Zone) Lookup(ctx context.Context, state request.Request, qname string) 
 			sigs := wildElem.TypeForWildcard(dns.TypeRRSIG, qname)
 			sigs = rrutil.SubTypeSignature(sigs, qtype)
 			rrs = append(rrs, sigs...)
-
 		}
 		return rrs, auth, nil, Success
 	}
@@ -272,7 +286,6 @@ func (z *Zone) Lookup(ctx context.Context, state request.Request, qname string) 
 				}
 			}
 		}
-
 	}
 Out:
 	return nil, ret, nil, rcode
@@ -307,7 +320,6 @@ func (a Apex) ns(do bool) []dns.RR {
 
 // externalLookup adds signatures and tries to resolve CNAMEs that point to external names.
 func (z *Zone) externalLookup(ctx context.Context, state request.Request, elem *tree.Elem, rrs []dns.RR) ([]dns.RR, []dns.RR, []dns.RR, Result) {
-
 	qtype := state.QType()
 	do := state.Do()
 
@@ -318,11 +330,11 @@ func (z *Zone) externalLookup(ctx context.Context, state request.Request, elem *
 	}
 
 	targetName := rrs[0].(*dns.CNAME).Target
-	elem, _ = z.Tree.Search(targetName)
+	elem, _ = z.Search(targetName)
 	if elem == nil {
 		lookupRRs, result := z.doLookup(ctx, state, targetName, qtype)
 		rrs = append(rrs, lookupRRs...)
-		return rrs, z.Apex.ns(do), nil, result
+		return rrs, z.ns(do), nil, result
 	}
 
 	i := 0
@@ -338,22 +350,22 @@ Redo:
 			rrs = append(rrs, sigs...)
 		}
 		targetName := cname[0].(*dns.CNAME).Target
-		elem, _ = z.Tree.Search(targetName)
+		elem, _ = z.Search(targetName)
 		if elem == nil {
 			lookupRRs, result := z.doLookup(ctx, state, targetName, qtype)
 			rrs = append(rrs, lookupRRs...)
-			return rrs, z.Apex.ns(do), nil, result
+			return rrs, z.ns(do), nil, result
 		}
 
 		i++
 		if i > 8 {
-			return rrs, z.Apex.ns(do), nil, Success
+			return rrs, z.ns(do), nil, Success
 		}
 
 		goto Redo
 	}
 
-	targets := rrutil.CNAMEForType(elem.All(), qtype)
+	targets := elem.Type(qtype)
 	if len(targets) > 0 {
 		rrs = append(rrs, targets...)
 
@@ -364,13 +376,13 @@ Redo:
 		}
 	}
 
-	return rrs, z.Apex.ns(do), nil, Success
+	return rrs, z.ns(do), nil, Success
 }
 
 func (z *Zone) doLookup(ctx context.Context, state request.Request, target string, qtype uint16) ([]dns.RR, Result) {
 	m, e := z.Upstream.Lookup(ctx, state, target, qtype)
 	if e != nil {
-		return nil, Success
+		return nil, ServerFailure
 	}
 	if m == nil {
 		return nil, Success
@@ -402,7 +414,7 @@ func (z *Zone) additionalProcessing(answer []dns.RR, do bool) (extra []dns.RR) {
 			continue
 		}
 
-		elem, _ := z.Tree.Search(name)
+		elem, _ := z.Search(name)
 		if elem == nil {
 			continue
 		}

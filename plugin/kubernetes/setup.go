@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -16,13 +16,12 @@ import (
 	clog "github.com/coredns/coredns/plugin/pkg/log"
 	"github.com/coredns/coredns/plugin/pkg/upstream"
 
+	"github.com/go-logr/logr"
 	"github.com/miekg/dns"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
-	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"       // pull this in here, because we want it excluded if plugin.cfg doesn't have k8s
-	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"      // pull this in here, because we want it excluded if plugin.cfg doesn't have k8s
-	_ "k8s.io/client-go/plugin/pkg/client/auth/openstack" // pull this in here, because we want it excluded if plugin.cfg doesn't have k8s
+	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc" // pull this in here, because we want it excluded if plugin.cfg doesn't have k8s
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 const pluginName = "kubernetes"
@@ -32,19 +31,24 @@ var log = clog.NewWithPlugin(pluginName)
 func init() { plugin.Register(pluginName, setup) }
 
 func setup(c *caddy.Controller) error {
-	klog.SetOutput(os.Stdout)
+	// Do not call klog.InitFlags(nil) here.  It will cause reload to panic.
+	klog.SetLogger(logr.New(&loggerAdapter{log}))
 
 	k, err := kubernetesParse(c)
 	if err != nil {
 		return plugin.Error(pluginName, err)
 	}
 
-	err = k.InitKubeCache(context.Background())
+	onStart, onShut, err := k.InitKubeCache(context.Background())
 	if err != nil {
 		return plugin.Error(pluginName, err)
 	}
-
-	k.RegisterKubeCache(c)
+	if onStart != nil {
+		c.OnStartup(onStart)
+	}
+	if onShut != nil {
+		c.OnShutdown(onShut)
+	}
 
 	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
 		k.Next = next
@@ -58,30 +62,6 @@ func setup(c *caddy.Controller) error {
 	})
 
 	return nil
-}
-
-// RegisterKubeCache registers KubeCache start and stop functions with Caddy
-func (k *Kubernetes) RegisterKubeCache(c *caddy.Controller) {
-	c.OnStartup(func() error {
-		go k.APIConn.Run()
-
-		timeout := time.After(5 * time.Second)
-		ticker := time.NewTicker(100 * time.Millisecond)
-		for {
-			select {
-			case <-ticker.C:
-				if k.APIConn.HasSynced() {
-					return nil
-				}
-			case <-timeout:
-				return nil
-			}
-		}
-	})
-
-	c.OnShutdown(func() error {
-		return k.APIConn.Stop()
-	})
 }
 
 func kubernetesParse(c *caddy.Controller) (*Kubernetes, error) {
@@ -107,30 +87,16 @@ func kubernetesParse(c *caddy.Controller) (*Kubernetes, error) {
 
 // ParseStanza parses a kubernetes stanza
 func ParseStanza(c *caddy.Controller) (*Kubernetes, error) {
-
 	k8s := New([]string{""})
 	k8s.autoPathSearch = searchFromResolvConf()
 
 	opts := dnsControlOpts{
 		initEndpointsCache: true,
-		useEndpointSlices:  false,
 		ignoreEmptyService: false,
 	}
 	k8s.opts = opts
 
-	zones := c.RemainingArgs()
-
-	if len(zones) != 0 {
-		k8s.Zones = zones
-		for i := 0; i < len(k8s.Zones); i++ {
-			k8s.Zones[i] = plugin.Host(k8s.Zones[i]).Normalize()
-		}
-	} else {
-		k8s.Zones = make([]string, len(c.ServerBlockKeys))
-		for i := 0; i < len(c.ServerBlockKeys); i++ {
-			k8s.Zones[i] = plugin.Host(c.ServerBlockKeys[i]).Normalize()
-		}
-	}
+	k8s.Zones = plugin.OriginsFromArgsOrServerBlock(c.RemainingArgs(), c.ServerBlockKeys)
 
 	k8s.primaryZoneIndex = -1
 	for i, z := range k8s.Zones {
@@ -147,6 +113,7 @@ func ParseStanza(c *caddy.Controller) (*Kubernetes, error) {
 
 	k8s.Upstream = upstream.New()
 
+	k8s.startupTimeout = time.Second * 5
 	for c.NextBlock() {
 		switch c.Val() {
 		case "endpoint_pod_names":
@@ -247,9 +214,8 @@ func ParseStanza(c *caddy.Controller) (*Kubernetes, error) {
 				if ignore == "empty_service" {
 					k8s.opts.ignoreEmptyService = true
 					continue
-				} else {
-					return nil, fmt.Errorf("unable to parse ignore value: '%v'", ignore)
 				}
+				return nil, fmt.Errorf("unable to parse ignore value: '%v'", ignore)
 			}
 		case "kubeconfig":
 			args := c.RemainingArgs()
@@ -265,6 +231,19 @@ func ParseStanza(c *caddy.Controller) (*Kubernetes, error) {
 				overrides,
 			)
 			k8s.ClientConfig = config
+		case "multicluster":
+			k8s.opts.multiclusterZones = plugin.OriginsFromArgsOrServerBlock(c.RemainingArgs(), []string{})
+		case "startup_timeout":
+			args := c.RemainingArgs()
+			if len(args) == 0 {
+				return nil, c.ArgErr()
+			} else {
+				var err error
+				k8s.startupTimeout, err = time.ParseDuration(args[0])
+				if err != nil {
+					return nil, fmt.Errorf("failed to parse startup_timeout: %v, %s", args[0], err)
+				}
+			}
 		default:
 			return nil, c.Errf("unknown property '%s'", c.Val())
 		}
@@ -272,6 +251,13 @@ func ParseStanza(c *caddy.Controller) (*Kubernetes, error) {
 
 	if len(k8s.Namespaces) != 0 && k8s.opts.namespaceLabelSelector != nil {
 		return nil, c.Errf("namespaces and namespace_labels cannot both be set")
+	}
+
+	for _, multiclusterZone := range k8s.opts.multiclusterZones {
+		if !slices.Contains(k8s.Zones, multiclusterZone) {
+			fmt.Println(k8s.Zones)
+			return nil, c.Errf("is not authoritative for the multicluster zone %s", multiclusterZone)
+		}
 	}
 
 	return k8s, nil

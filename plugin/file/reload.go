@@ -2,12 +2,13 @@ package file
 
 import (
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/coredns/coredns/plugin/transfer"
 )
 
-// Reload reloads a zone when it is changed on disk. If z.NoReload is true, no reloading will be done.
+// Reload reloads a zone when it is changed on disk. If z.ReloadInterval is zero, no reloading will be done.
 func (z *Zone) Reload(t *transfer.Transfer) error {
 	if z.ReloadInterval == 0 {
 		return nil
@@ -19,7 +20,7 @@ func (z *Zone) Reload(t *transfer.Transfer) error {
 			select {
 			case <-tick.C:
 				zFile := z.File()
-				reader, err := os.Open(zFile)
+				reader, err := os.Open(filepath.Clean(zFile))
 				if err != nil {
 					log.Errorf("Failed to open zone %q in %q: %v", z.origin, zFile, err)
 					continue
@@ -41,7 +42,7 @@ func (z *Zone) Reload(t *transfer.Transfer) error {
 				z.Tree = zone.Tree
 				z.Unlock()
 
-				log.Infof("Successfully reloaded zone %q in %q with %d SOA serial", z.origin, zFile, z.Apex.SOA.Serial)
+				log.Infof("Successfully reloaded zone %q in %q with %d SOA serial", z.origin, zFile, z.SOA.Serial)
 				if t != nil {
 					if err := t.Notify(z.origin); err != nil {
 						log.Warningf("Failed sending notifies: %s", err)
@@ -61,8 +62,8 @@ func (z *Zone) Reload(t *transfer.Transfer) error {
 func (z *Zone) SOASerialIfDefined() int64 {
 	z.RLock()
 	defer z.RUnlock()
-	if z.Apex.SOA != nil {
-		return int64(z.Apex.SOA.Serial)
+	if z.SOA != nil {
+		return int64(z.SOA.Serial)
 	}
 	return -1
 }

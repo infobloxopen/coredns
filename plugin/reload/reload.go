@@ -3,7 +3,7 @@ package reload
 
 import (
 	"bytes"
-	"crypto/md5"
+	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
 	"sync"
@@ -60,7 +60,7 @@ func parse(corefile caddy.Input) ([]byte, error) {
 	return json.Marshal(serverBlocks)
 }
 
-func hook(event caddy.EventName, info interface{}) error {
+func hook(event caddy.EventName, info any) error {
 	if event != caddy.InstanceStartupEvent {
 		return nil
 	}
@@ -78,11 +78,12 @@ func hook(event caddy.EventName, info interface{}) error {
 		return err
 	}
 
-	md5sum := md5.Sum(parsedCorefile)
-	log.Infof("Running configuration MD5 = %x\n", md5sum)
+	sha512sum := sha512.Sum512(parsedCorefile)
+	log.Infof("Running configuration SHA512 = %x\n", sha512sum)
 
 	go func() {
 		tick := time.NewTicker(r.interval())
+		defer tick.Stop()
 
 		for {
 			select {
@@ -96,16 +97,20 @@ func hook(event caddy.EventName, info interface{}) error {
 					log.Warningf("Corefile parse failed: %s", err)
 					continue
 				}
-				s := md5.Sum(parsedCorefile)
-				if s != md5sum {
-					reloadInfo.Delete(prometheus.Labels{"hash": "md5", "value": hex.EncodeToString(md5sum[:])})
+				s := sha512.Sum512(parsedCorefile)
+				if s != sha512sum {
+					reloadInfo.Delete(prometheus.Labels{"hash": "sha512", "value": hex.EncodeToString(sha512sum[:])})
 					// Let not try to restart with the same file, even though it is wrong.
-					md5sum = s
+					sha512sum = s
 					// now lets consider that plugin will not be reload, unless appear in next config file
 					// change status of usage will be reset in setup if the plugin appears in config file
 					r.setUsage(maybeUsed)
+					// If shutdown is in progress, avoid attempting a restart.
+					if shutdownRequested(r.quit) {
+						return
+					}
 					_, err := instance.Restart(corefile)
-					reloadInfo.WithLabelValues("md5", hex.EncodeToString(md5sum[:])).Set(1)
+					reloadInfo.WithLabelValues("sha512", hex.EncodeToString(sha512sum[:])).Set(1)
 					if err != nil {
 						log.Errorf("Corefile changed but reload failed: %s", err)
 						failedCount.Add(1)
@@ -124,4 +129,15 @@ func hook(event caddy.EventName, info interface{}) error {
 	}()
 
 	return nil
+}
+
+// shutdownRequested reports whether a shutdown has been requested via quit channel.
+// helps with unit testing of the shutdown gate logic.
+func shutdownRequested(quit <-chan bool) bool {
+	select {
+	case <-quit:
+		return true
+	default:
+		return false
+	}
 }

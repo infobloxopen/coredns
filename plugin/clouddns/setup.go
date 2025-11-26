@@ -43,7 +43,7 @@ func setup(c *caddy.Controller) error {
 
 		args := c.RemainingArgs()
 
-		for i := 0; i < len(args); i++ {
+		for i := range args {
 			parts := strings.SplitN(args[i], ":", 3)
 			if len(parts) != 3 {
 				return plugin.Error("clouddns", c.Errf("invalid zone %q", args[i]))
@@ -81,16 +81,19 @@ func setup(c *caddy.Controller) error {
 		ctx, cancel := context.WithCancel(context.Background())
 		client, err := f(ctx, opt)
 		if err != nil {
+			cancel()
 			return err
 		}
 
 		h, err := New(ctx, client, keys, up)
 		if err != nil {
+			cancel()
 			return plugin.Error("clouddns", c.Errf("failed to create plugin: %v", err))
 		}
 		h.Fall = fall
 
 		if err := h.Run(ctx); err != nil {
+			cancel()
 			return plugin.Error("clouddns", c.Errf("failed to initialize plugin: %v", err))
 		}
 

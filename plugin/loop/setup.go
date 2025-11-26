@@ -1,7 +1,6 @@
 package loop
 
 import (
-	"math/rand"
 	"net"
 	"strconv"
 	"time"
@@ -10,6 +9,7 @@ import (
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/pkg/dnsutil"
+	"github.com/coredns/coredns/plugin/pkg/rand"
 )
 
 func init() { plugin.Register("loop", setup) }
@@ -31,7 +31,10 @@ func setup(c *caddy.Controller) error {
 		go func() {
 			deadline := time.Now().Add(30 * time.Second)
 			conf := dnsserver.GetConfig(c)
-			lh := conf.ListenHosts[0]
+			lh := ""
+			if len(conf.ListenHosts) > 0 {
+				lh = conf.ListenHosts[0]
+			}
 			addr := net.JoinHostPort(lh, conf.Port)
 
 			for time.Now().Before(deadline) {
@@ -59,7 +62,7 @@ func setup(c *caddy.Controller) error {
 
 func parse(c *caddy.Controller) (*Loop, error) {
 	i := 0
-	zone := "."
+	zones := []string{"."}
 	for c.Next() {
 		if i > 0 {
 			return nil, plugin.ErrOnce
@@ -70,10 +73,13 @@ func parse(c *caddy.Controller) (*Loop, error) {
 		}
 
 		if len(c.ServerBlockKeys) > 0 {
-			zone = plugin.Host(c.ServerBlockKeys[0]).Normalize()
+			z := plugin.Host(c.ServerBlockKeys[0]).NormalizeExact()
+			if len(z) > 0 {
+				zones = z
+			}
 		}
 	}
-	return New(zone), nil
+	return New(zones[0]), nil
 }
 
 // qname returns a random name. <rand.Int()>.<rand.Int().<zone>.
@@ -84,4 +90,4 @@ func qname(zone string) string {
 	return dnsutil.Join(l1, l2, zone)
 }
 
-var r = rand.New(rand.NewSource(time.Now().UnixNano()))
+var r = rand.New(time.Now().UnixNano())

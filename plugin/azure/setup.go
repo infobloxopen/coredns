@@ -29,20 +29,24 @@ func setup(c *caddy.Controller) error {
 
 	publicDNSClient := publicAzureDNS.NewRecordSetsClient(env.Values[auth.SubscriptionID])
 	if publicDNSClient.Authorizer, err = env.GetAuthorizer(); err != nil {
+		cancel()
 		return plugin.Error("azure", err)
 	}
 
 	privateDNSClient := privateAzureDNS.NewRecordSetsClient(env.Values[auth.SubscriptionID])
 	if privateDNSClient.Authorizer, err = env.GetAuthorizer(); err != nil {
+		cancel()
 		return plugin.Error("azure", err)
 	}
 
 	h, err := New(ctx, publicDNSClient, privateDNSClient, keys, accessMap)
 	if err != nil {
+		cancel()
 		return plugin.Error("azure", err)
 	}
 	h.Fall = fall
 	if err := h.Run(ctx); err != nil {
+		cancel()
 		return plugin.Error("azure", err)
 	}
 
@@ -69,7 +73,7 @@ func parse(c *caddy.Controller) (auth.EnvironmentSettings, map[string][]string, 
 	for c.Next() {
 		args := c.RemainingArgs()
 
-		for i := 0; i < len(args); i++ {
+		for i := range args {
 			parts := strings.SplitN(args[i], ":", 2)
 			if len(parts) != 2 {
 				return env, resourceGroupMapping, accessMap, fall, c.Errf("invalid resource group/zone: %q", args[i])

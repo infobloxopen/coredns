@@ -1,7 +1,6 @@
 package auto
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,14 +18,11 @@ www IN A 127.0.0.1
 `
 
 func TestWalk(t *testing.T) {
-	tempdir, err := createFiles()
+	t.Parallel()
+	tempdir, err := createFiles(t)
 	if err != nil {
-		if tempdir != "" {
-			os.RemoveAll(tempdir)
-		}
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tempdir)
 
 	ldr := loader{
 		directory: tempdir,
@@ -43,13 +39,14 @@ func TestWalk(t *testing.T) {
 
 	// db.example.org and db.example.com should be here (created in createFiles)
 	for _, name := range []string{"example.com.", "example.org."} {
-		if _, ok := a.Zones.Z[name]; !ok {
+		if _, ok := a.Z[name]; !ok {
 			t.Errorf("%s should have been added", name)
 		}
 	}
 }
 
 func TestWalkNonExistent(t *testing.T) {
+	t.Parallel()
 	nonExistingDir := "highly_unlikely_to_exist_dir"
 
 	ldr := loader{
@@ -66,22 +63,20 @@ func TestWalkNonExistent(t *testing.T) {
 	a.Walk()
 }
 
-func createFiles() (string, error) {
-	dir, err := ioutil.TempDir(os.TempDir(), "coredns")
-	if err != nil {
-		return dir, err
-	}
+func createFiles(t *testing.T) (string, error) {
+	t.Helper()
+	dir := t.TempDir()
 
 	for _, name := range dbFiles {
-		if err := ioutil.WriteFile(filepath.Join(dir, name), []byte(zoneContent), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(zoneContent), 0644); err != nil {
 			return dir, err
 		}
 	}
 	// symlinks
-	if err = os.Symlink(filepath.Join(dir, "db.example.org"), filepath.Join(dir, "db.example.com")); err != nil {
+	if err := os.Symlink(filepath.Join(dir, "db.example.org"), filepath.Join(dir, "db.example.com")); err != nil {
 		return dir, err
 	}
-	if err = os.Symlink(filepath.Join(dir, "db.example.org"), filepath.Join(dir, "aa.example.com")); err != nil {
+	if err := os.Symlink(filepath.Join(dir, "db.example.org"), filepath.Join(dir, "aa.example.com")); err != nil {
 		return dir, err
 	}
 

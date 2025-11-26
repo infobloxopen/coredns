@@ -1,7 +1,6 @@
 package test
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,11 +11,7 @@ import (
 
 func TestAuto(t *testing.T) {
 	t.Parallel()
-	tmpdir, err := ioutil.TempDir(os.TempDir(), "coredns")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpdir)
+	tmpdir := t.TempDir()
 
 	corefile := `org:0 {
 		auto {
@@ -37,12 +32,12 @@ func TestAuto(t *testing.T) {
 	if err != nil {
 		t.Fatal("Expected to receive reply, but didn't")
 	}
-	if resp.Rcode != dns.RcodeServerFailure {
-		t.Fatalf("Expected reply to be a SERVFAIL, got %d", resp.Rcode)
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("Expected reply to be REFUSED, got %d", resp.Rcode)
 	}
 
 	// Write db.example.org to get example.org.
-	if err = ioutil.WriteFile(filepath.Join(tmpdir, "db.example.org"), []byte(zoneContent), 0644); err != nil {
+	if err = os.WriteFile(filepath.Join(tmpdir, "db.example.org"), []byte(zoneContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -64,18 +59,14 @@ func TestAuto(t *testing.T) {
 	if err != nil {
 		t.Fatal("Expected to receive reply, but didn't")
 	}
-	if resp.Rcode != dns.RcodeServerFailure {
-		t.Fatalf("Expected reply to be a SERVFAIL, got %d", resp.Rcode)
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("Expected reply to be REFUSED, got %d", resp.Rcode)
 	}
 }
 
 func TestAutoNonExistentZone(t *testing.T) {
 	t.Parallel()
-	tmpdir, err := ioutil.TempDir(os.TempDir(), "coredns")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpdir)
+	tmpdir := t.TempDir()
 
 	corefile := `.:0 {
 		auto {
@@ -102,19 +93,15 @@ func TestAutoNonExistentZone(t *testing.T) {
 	if err != nil {
 		t.Fatal("Expected to receive reply, but didn't")
 	}
-	if resp.Rcode != dns.RcodeServerFailure {
-		t.Fatalf("Expected reply to be a SERVFAIL, got %d", resp.Rcode)
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("Expected reply to be REFUSED, got %d", resp.Rcode)
 	}
 }
 
 func TestAutoAXFR(t *testing.T) {
 	t.Parallel()
 
-	tmpdir, err := ioutil.TempDir(os.TempDir(), "coredns")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpdir)
+	tmpdir := t.TempDir()
 
 	corefile := `org:0 {
 		auto {
@@ -138,7 +125,7 @@ func TestAutoAXFR(t *testing.T) {
 	defer i.Stop()
 
 	// Write db.example.org to get example.org.
-	if err = ioutil.WriteFile(filepath.Join(tmpdir, "db.example.org"), []byte(zoneContent), 0644); err != nil {
+	if err = os.WriteFile(filepath.Join(tmpdir, "db.example.org"), []byte(zoneContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 

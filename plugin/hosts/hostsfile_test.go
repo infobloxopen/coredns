@@ -45,16 +45,13 @@ var (
 	singlelinehosts = `127.0.0.2  odin`
 	ipv4hosts       = `# See https://tools.ietf.org/html/rfc1123.
 	#
-	# The literal IPv4 address parser in the net package is a relaxed
-	# one. It may accept a literal IPv4 address in dotted-decimal notation
-	# with leading zeros such as "001.2.003.4".
 
 	# internet address and host name
 	127.0.0.1	localhost	# inline comment separated by tab
-	127.000.000.002	localhost       # inline comment separated by space
+	127.0.0.2	localhost       # inline comment separated by space
 
 	# internet address, host name and aliases
-	127.000.000.003	localhost	localhost.localdomain`
+	127.0.0.3	localhost	localhost.localdomain`
 	ipv6hosts = `# See https://tools.ietf.org/html/rfc5952, https://tools.ietf.org/html/rfc4007.
 
 	# internet address and host name
@@ -123,6 +120,7 @@ func TestLookupStaticHost(t *testing.T) {
 }
 
 func testStaticHost(t *testing.T, ent staticHostEntry, h *Hostsfile) {
+	t.Helper()
 	ins := []string{ent.in, plugin.Name(ent.in).Normalize(), strings.ToLower(ent.in), strings.ToUpper(ent.in)}
 	for k, in := range ins {
 		addrsV4 := h.LookupStaticHostV4(in)
@@ -209,6 +207,7 @@ func TestLookupStaticAddr(t *testing.T) {
 }
 
 func testStaticAddr(t *testing.T, ent staticIPEntry, h *Hostsfile) {
+	t.Helper()
 	hosts := h.LookupStaticAddr(ent.in)
 	for i := range ent.out {
 		ent.out[i] = plugin.Name(ent.out[i]).Normalize()

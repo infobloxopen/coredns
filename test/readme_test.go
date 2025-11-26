@@ -3,9 +3,9 @@ package test
 import (
 	"bufio"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -36,14 +36,22 @@ PrivateKey: f03VplaIEA+KHI9uizlemUSbUJH86hPBPjmcUninPoM=
 // actually works. Each corefile snippet is only used if the language is set to 'corefile':
 //
 // ~~~ corefile
-// . {
-//	# check-this-please
-// }
+//
+//	. {
+//		# check-this-please
+//	}
+//
 // ~~~
 //
 // While we're at it - we also check the README.md itself. It should at least have the sections:
 // Name, Description, Syntax and Examples. See plugin.md for more details.
 func TestReadme(t *testing.T) {
+	// Skip on non-Linux systems as some tests refer to for e.g. loopback interfaces which
+	// are not present on all systems.
+	if runtime.GOOS != "linux" {
+		t.Skipf("Skipping readme test on %s", runtime.GOOS)
+	}
+
 	port := 30053
 	caddy.Quiet = true
 	dnsserver.Quiet = true
@@ -52,7 +60,7 @@ func TestReadme(t *testing.T) {
 	defer remove(contents)
 
 	middle := filepath.Join("..", "plugin")
-	dirs, err := ioutil.ReadDir(middle)
+	dirs, err := os.ReadDir(middle)
 	if err != nil {
 		t.Fatalf("Could not read %s: %q", middle, err)
 	}
@@ -165,15 +173,14 @@ func sectionsFromReadme(readme string) error {
 		}
 	}
 	if section != 4 {
-		return fmt.Errorf("Sections incomplete or ordered wrong: %q, want (at least): Name, Descripion, Syntax and Examples", readme)
+		return fmt.Errorf("Sections incomplete or ordered wrong: %q, want (at least): Name, Description, Syntax and Examples", readme)
 	}
 	return nil
-
 }
 
 func create(c map[string]string) {
 	for name, content := range c {
-		ioutil.WriteFile(name, []byte(content), 0644)
+		os.WriteFile(name, []byte(content), 0644)
 	}
 }
 

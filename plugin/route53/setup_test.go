@@ -1,17 +1,18 @@
 package route53
 
 import (
+	"context"
 	"testing"
 
 	"github.com/coredns/caddy"
 
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/service/route53/route53iface"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/route53"
 )
 
 func TestSetupRoute53(t *testing.T) {
-	f = func(credential *credentials.Credentials) route53iface.Route53API {
-		return fakeRoute53{}
+	f = func(_ context.Context, _ []func(*config.LoadOptions) error, _ []func(*route53.Options)) (route53Client, error) {
+		return fakeRoute53{}, nil
 	}
 
 	tests := []struct {
@@ -70,6 +71,12 @@ func TestSetupRoute53(t *testing.T) {
 
 		{`route53 example.org {
 	}`, true},
+		{`route53 example.org:12345678 {
+    aws_endpoint
+}`, true},
+		{`route53 example.org:12345678 {
+    aws_endpoint https://localhost
+}`, false},
 	}
 
 	for _, test := range tests {

@@ -43,28 +43,24 @@ func parse(c *caddy.Controller) (ACL, error) {
 	a := ACL{}
 	for c.Next() {
 		r := rule{}
-		r.zones = c.RemainingArgs()
-		if len(r.zones) == 0 {
-			// if empty, the zones from the configuration block are used.
-			r.zones = make([]string, len(c.ServerBlockKeys))
-			copy(r.zones, c.ServerBlockKeys)
-		}
-		for i := range r.zones {
-			r.zones[i] = plugin.Host(r.zones[i]).Normalize()
-		}
+		args := c.RemainingArgs()
+		r.zones = plugin.OriginsFromArgsOrServerBlock(args, c.ServerBlockKeys)
 
 		for c.NextBlock() {
 			p := policy{}
 
 			action := strings.ToLower(c.Val())
-			if action == "allow" {
+			switch action {
+			case "allow":
 				p.action = actionAllow
-			} else if action == "block" {
+			case "block":
 				p.action = actionBlock
-			} else if action == "filter" {
+			case "filter":
 				p.action = actionFilter
-			} else {
-				return a, c.Errf("unexpected token %q; expect 'allow', 'block', or 'filter'", c.Val())
+			case "drop":
+				p.action = actionDrop
+			default:
+				return a, c.Errf("unexpected token %q; expect 'allow', 'block', 'filter' or 'drop'", c.Val())
 			}
 
 			p.qtypes = make(map[uint16]struct{})
