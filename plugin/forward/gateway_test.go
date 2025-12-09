@@ -687,7 +687,6 @@ func TestFetchProxies(t *testing.T) {
 				proxyCache.set(tc.gateways[0],
 					[]*proxy.Proxy{cachedProxy},
 					time.Now().Add(1*time.Second)) // Set to current time to simulate existing cache entry
-
 			}
 			if tc.setupCache && !tc.testIPChange && !tc.testCachePurge {
 				cachedProxy := proxy.NewProxy("cached", "10.0.0.1:53", "dns")
