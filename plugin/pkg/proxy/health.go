@@ -48,7 +48,6 @@ type dohConn struct {
 
 // NewHealthChecker returns a new HealthChecker based on transport.
 func NewHealthChecker(proxyName, trans string, recursionDesired bool, domain string) HealthChecker {
-
 	base := baseHealthChecker{
 		recursionDesired: recursionDesired,
 		domain:           domain,

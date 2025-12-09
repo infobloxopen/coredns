@@ -695,7 +695,6 @@ func TestFetchProxies(t *testing.T) {
 					[]*proxy.Proxy{cachedProxy},
 					time.Now().Add(5*time.Minute))
 			}
-
 			time.Sleep(1100 * time.Millisecond) // Wait slightly longer than 1 second for cache expiration
 
 			// Call fetchProxies directly

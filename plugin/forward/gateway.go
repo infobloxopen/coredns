@@ -187,7 +187,7 @@ func (f *Forward) fetchProxies(ctx context.Context, gateways []string, w dns.Res
 		}
 		// Cache new proxies
 		if len(customProxies) > 0 {
-			proxyCache.set(gateway, customProxies, time.Now().Add(time.Duration(ttl)))
+			proxyCache.set(gateway, customProxies, time.Now().Add(time.Duration(ttl))) //nolint:unconvert
 			proxies = append(proxies, customProxies...)
 		} else {
 			proxyCache.removeEntry(gateway)
