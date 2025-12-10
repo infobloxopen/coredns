@@ -316,7 +316,7 @@ func parseBlock(c *caddy.Controller, f *Forward) error {
 		if c.NextArg() {
 			return c.ArgErr()
 		}
-		f.appendDefaultInfobloxGatewayForCustomGateways = true
+		f.appendDefaultGatewayForCustomGateways = true
 	default:
 		return c.Errf("unknown property '%s'", c.Val())
 	}

@@ -45,13 +45,13 @@ type Forward struct {
 
 	nextAlternateRcodes []int
 
-	tlsConfig                                     *tls.Config
-	tlsServerName                                 string
-	maxfails                                      uint32
-	expire                                        time.Duration
-	maxConcurrent                                 int64
-	failfastUnhealthyUpstreams                    bool
-	appendDefaultInfobloxGatewayForCustomGateways bool
+	tlsConfig                             *tls.Config
+	tlsServerName                         string
+	maxfails                              uint32
+	expire                                time.Duration
+	maxConcurrent                         int64
+	failfastUnhealthyUpstreams            bool
+	appendDefaultGatewayForCustomGateways bool
 
 	opts proxy.Options // also here for testing
 
@@ -118,7 +118,7 @@ func (f *Forward) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	log.Infof("Custom upstream count: %d", customCount)
 	if customCount > 0 {
 		list = custom
-		if f.appendDefaultInfobloxGatewayForCustomGateways {
+		if f.appendDefaultGatewayForCustomGateways {
 			log.Infof("Appending default upstreams to custom upstreams")
 			list = append(list, f.List()...) // default + normal upstreams appended
 		}
