@@ -312,7 +312,7 @@ func parseBlock(c *caddy.Controller, f *Forward) error {
 			return c.ArgErr()
 		}
 		f.failfastUnhealthyUpstreams = true
-	case "append_default_infoblox_gateway_for_custom_gateways":
+	case "append_default_gateway_for_custom_gateways":
 		if c.NextArg() {
 			return c.ArgErr()
 		}
